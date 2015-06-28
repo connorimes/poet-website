@@ -1,0 +1,188 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+	<head>
+		<title>POET: The Performance with Optimal Energy Toolkit</title>
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+		<meta name="description" content="POET: The Performance with Optimal Energy Toolkit" />
+		<meta name="keywords" content="poet,performance,energy,optimal,minimal,toolkit,library" />
+		<link rel="stylesheet" type="text/css" href="style.css" media="screen"/>
+	</head>
+	<body>
+		<div class="main">
+			<div class="top"></div>
+			<h1>POET</h1>
+			<h2>The Performance with Optimal Energy Toolkit</h2>
+
+			<div class="space"></div>
+
+			<div class="navlist">
+				<ul>
+					<li>
+						<a href="#source">Source Code</a>
+					</li>
+					<li>
+						<a href="#benchmarks">Benchmark Patches</a>
+					</li>
+					<li>
+						<a href="#comments">Additional Comments</a>
+					</li>
+				</ul>
+			</div>
+
+			<div class="space"></div>
+
+			<div class="content">
+
+				<div class="post">
+					<div class="posttitle" id="source">
+						Source Code
+					</div>
+					<p>
+						POET source code, including example configurations, is available at:
+						<br />
+						<a href="https://github.com/libpoet/poet">https://github.com/libpoet/poet</a>
+					</p>
+					<p>
+						The Heartbeats 2.0 dependency is available at:
+						<br />
+						<a href="https://github.com/libheartbeats/heartbeats">https://github.com/libheartbeats/heartbeats</a>
+					</p>
+					<p>
+						For easy integration with other software, both libraries should be installed to the local system.
+						The simplest way to do this is to run <em>make install</em> from each project directory (root privileges may be required).
+					</p>
+				</div>
+
+				<div class="post">
+					<div class="posttitle" id="benchmarks">
+						Benchmark Patches
+					</div>
+					<p>
+						Git patches are available for eight benchmarks from three different suites.
+						<h3>PARSEC</h3>
+						<p>
+							<a href="parsec-3.0-beta-20130728-poet.diff">parsec-3.0-beta-20130728-poet.diff</a>
+							<br />
+							Includes modifications for <em>blackscholes</em>, <em>bodytrack</em>, <em>facesim</em>, <em>ferret</em>, and <em>x264</em>.
+							<p>
+								To apply the patch for a new installation, first download PARSEC 3.0-beta-20130728 from the <a href="http://parsec.cs.princeton.edu/">PARSEC website</a>.
+							</p>
+							<p>
+								<pre>
+tar xzvf parsec-3.0-core.tar.gz
+cd parsec-3.0
+git init
+git add .
+git commit -m "Add PARSEC"
+git apply /path/to/parsec-3.0-beta-20130728-poet.diff
+git add .
+git commit -m "Add POET"
+								</pre>
+							</p>
+							<p>
+								To build, use the <em>gcc-hooks-poet</em> configuration:
+								<pre>bin/parsecmgmt -c gcc-hooks-poet -p &lt;benchmark&gt; -a &lt;build|clean|uninstall&gt;</pre>
+							</p>
+						</p>
+						<h3>ParMiBench</h3>
+						<p>
+							<a href="parmibench-poet.diff">parmibench-poet.diff</a>
+							<br />
+							Includes modifications for <em>dijkstra</em> and <em>sha</em>.
+						</p>
+						<p>
+							To apply the patch for a new installation, first download the benchmark from the <a href="https://code.google.com/p/multiprocessor-benchmark/">ParMiBench website</a>.
+						</p>
+						<p>
+							<pre>
+unzip parmibench.zip -d parmibench
+cd parmibench/Products
+git init
+git add .
+git commit -m "Add ParMiBench"
+git apply /path/to/parmibench-poet.diff
+git add .
+git commit -m "Add POET"
+							</pre>
+						</p>
+						<p>
+							To build, simply change to either <em>Network/Dijkstra/Parallel</em> or <em>Security/sha</em> and run:
+							<pre>make</pre>
+						</p>
+						<h3>STREAM</h3>
+						<p>
+							<a href="stream-poet.diff">stream-poet.diff</a>
+						</p>
+						<p>
+							To apply the patch for a new installation, first download the benchmark from the <a href="http://www.cs.virginia.edu/stream/">STREAM  website</a>.
+						</p>
+						<p>
+							<pre>
+cd FTP/Code
+git init
+git add .
+git commit -m "Add STREAM"
+git apply /path/to/stream-poet.diff
+git add .
+git commit -m "Add POET"
+							</pre>
+						</p>
+						<p>
+							To build, simply run:
+							<pre>make</pre>
+						</p>
+					</p>
+				</div>
+
+				<div class="post">
+					<div class="contents">
+						<div class="posttitle" id="comments">
+							Additional Comments
+						</div>
+						<p>
+							<h3>A Note on Heartbeats</h3>
+						<p>
+							Heartbeats use shared memory to support inter-process communication.
+							However, they do not clean up after themselves - that is the user's responsbility.
+							The following is a simple script to free memory after processes complete:
+							<pre>
+#!/bin/bash
+# Cleanup heartbeats shared memory
+# Connor Imes
+# 2015-01-15
+
+MEMS=`ipcs | grep $USER | awk '{print $2}'`
+for k in $MEMS
+do
+        echo Freeing $k
+        ipcrm -m $k
+done
+							</pre>
+						</p>
+						</p>
+					</div>
+				</div>
+
+			</div>
+
+			<div class="clear"></div>
+
+			<div class="footer">
+				&copy;2014-2015 University of Chicago, Department of Computer Science
+			</div>
+
+		</div>
+		
+		<script>
+		  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+		  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+		  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+		  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+		
+		  ga('create', 'UA-56069643-1', 'auto');
+		  ga('send', 'pageview');
+		</script>
+
+	</body>
+</html>
