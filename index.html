@@ -11,7 +11,7 @@
 	<body>
 		<div class="main">
 			<div class="top"></div>
-			<h1>POET</h1>
+			<h1>POET &amp; Bard</h1>
 			<h2>The Performance with Optimal Energy Toolkit</h2>
 
 			<div class="space"></div>
@@ -52,6 +52,16 @@
 						For easy integration with other software, both libraries should be installed to the local system.
 						The simplest way to do this is to run <em>make install</em> from each project directory (root privileges may be required).
 					</p>
+					<hr />
+					<p>
+						Looking for Bard? Find the Bard fork of POET at:
+						<br />
+						<a href="https://github.com/libpoet/bard">https://github.com/libpoet/bard</a>
+					</p>
+					<p>
+						There is a "bard" <a href="https://github.com/libheartbeats/heartbeats/tree/bard">branch</a> of heartbeats
+						if you need the updated hb-energy implementation to support both the Hardkernel ODROID-XU+E and ODROID-XU3.
+					</p>
 				</div>
 
 				<div class="post">
@@ -81,8 +91,7 @@ git commit -m "Add POET"
 								</pre>
 							</p>
 							<p>
-								To build, use the <em>gcc-hooks-poet</em> configuration:
-								<pre>bin/parsecmgmt -c gcc-hooks-poet -p &lt;benchmark&gt; -a &lt;build|clean|uninstall&gt;</pre>
+								To build, use the <em>gcc-hooks-poet</em> configuration: 								<pre>bin/parsecmgmt -c gcc-hooks-poet -p &lt;benchmark&gt; -a &lt;build|clean|uninstall&gt;</pre>
 							</p>
 						</p>
 						<h3>ParMiBench</h3>
@@ -107,8 +116,7 @@ git commit -m "Add POET"
 							</pre>
 						</p>
 						<p>
-							To build, simply change to either <em>Network/Dijkstra/Parallel</em> or <em>Security/sha</em> and run:
-							<pre>make</pre>
+							To build, simply change to either <em>Network/Dijkstra/Parallel</em> or <em>Security/sha</em> and run: 							<pre>make</pre>
 						</p>
 						<h3>STREAM</h3>
 						<p>
@@ -142,24 +150,21 @@ git commit -m "Add POET"
 						</div>
 						<p>
 							<h3>A Note on Heartbeats</h3>
-						<p>
-							Heartbeats use shared memory to support inter-process communication.
-							However, they do not clean up after themselves - that is the user's responsbility.
-							The following is a simple script to free memory after processes complete:
-							<pre>
+							<p>
+								Heartbeats use shared memory to support inter-process communication.
+								However, they do not clean up after themselves - that is the user's responsbility.
+								The following is a simple script to free memory after processes complete:
+								<pre>
 #!/bin/bash
-# Cleanup heartbeats shared memory
-# Connor Imes
-# 2015-01-15
-
+# Cleanup shared memory
 MEMS=`ipcs | grep $USER | awk '{print $2}'`
 for k in $MEMS
 do
-        echo Freeing $k
-        ipcrm -m $k
+  echo Freeing $k
+  ipcrm -m $k
 done
 							</pre>
-						</p>
+							</p>
 						</p>
 					</div>
 				</div>
@@ -173,15 +178,22 @@ done
 			</div>
 
 		</div>
-		
+
 		<script>
-		  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
-		  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
-		  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
-		  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
-		
-		  ga('create', 'UA-56069643-1', 'auto');
-		  ga('send', 'pageview');
+			(function(i, s, o, g, r, a, m) {
+				i['GoogleAnalyticsObject'] = r;
+				i[r] = i[r] ||
+				function() {
+					(i[r].q = i[r].q || []).push(arguments)
+				}, i[r].l = 1 * new Date();
+				a = s.createElement(o), m = s.getElementsByTagName(o)[0];
+				a.async = 1;
+				a.src = g;
+				m.parentNode.insertBefore(a, m)
+			})(window, document, 'script', '//www.google-analytics.com/analytics.js', 'ga');
+
+			ga('create', 'UA-56069643-1', 'auto');
+			ga('send', 'pageview');
 		</script>
 
 	</body>
