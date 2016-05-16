@@ -1,0 +1,1646 @@
+diff --git a/config/gcc-hooks-poet.bldconf b/config/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..db2a8a5
+--- /dev/null
++++ b/config/gcc-hooks-poet.bldconf
+@@ -0,0 +1,13 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/config/gcc-hooks.bldconf
++
++# Link with heartbeats and poet libraries
++CFLAGS="${CFLAGS} -O2"
++CXXFLAGS="${CXXFLAGS} -O2"
++LDFLAGS="${LDFLAGS}"
++LIBS="${LIBS} -lpoet -lhb-acc-pow-shared -lhb-energy-msr -lrt -lstdc++"
++# LIBS="${LIBS} -lpoet -lhb-acc-pow-shared -lhb-energy-odroid -lrt -lstdc++"
++# LIBS="${LIBS} -lpoet -lhb-acc-pow-shared -lhb-energy-wattsup -lwattsup -lrt -lstdc++"
+diff --git a/pkgs/apps/blackscholes/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/blackscholes/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..91bfb52
+--- /dev/null
++++ b/pkgs/apps/blackscholes/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/blackscholes/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/blackscholes/src/blackscholes.c b/pkgs/apps/blackscholes/src/blackscholes.c
+index 559628d..0e7795d 100644
+--- a/pkgs/apps/blackscholes/src/blackscholes.c
++++ b/pkgs/apps/blackscholes/src/blackscholes.c
+@@ -16,6 +16,21 @@
+ #include <hooks.h>
+ #endif
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "BLACKSCHOLES"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++int perf_pwr_switch;
++
+ // Multi-threaded pthreads header
+ #ifdef ENABLE_THREADS
+ // Add the following line so that icc 9.0 is compatible with pthread lib.
+@@ -77,6 +92,85 @@ fptype * otime;
+ int numError = 0;
+ int nThreads;
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++    poet_tradeoff_type_t constraint;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 20;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 100;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++    if(getenv(PREFIX"_CONSTRAINT") == NULL) {
++      constraint = PERFORMANCE;
++    } else if (strcmp(getenv(PREFIX"_CONSTRAINT"), "POWER") == 0){
++      constraint = POWER;
++    } else {
++      constraint = PERFORMANCE;
++    }
++    if (getenv(PREFIX"_PERF_PWR_SWITCH_HB") == NULL) {
++      perf_pwr_switch = -1;
++    } else {
++      perf_pwr_switch = atoi(getenv(PREFIX"_PERF_PWR_SWITCH_HB"));
++    }
++
++    printf("init heartbeat with %f %f %f %d\n", min_heartrate, max_heartrate, power_target, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, constraint, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
++
+ ////////////////////////////////////////////////////////////////////////////////
+ ////////////////////////////////////////////////////////////////////////////////
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -270,6 +364,7 @@ int bs_thread(void *tid_ptr) {
+ }
+ #else // !ENABLE_TBB
+ 
++int counter = 0;
+ #ifdef WIN32
+ DWORD WINAPI bs_thread(LPVOID tid_ptr){
+ #else
+@@ -283,6 +378,16 @@ int bs_thread(void *tid_ptr) {
+     int end = start + (numOptions / nThreads);
+ 
+     for (j=0; j<NUM_RUNS; j++) {
++        int old_counter = __sync_fetch_and_add(&counter, 1);
++        if((old_counter % (NUM_RUNS / 20)) == 0) {
++          heartbeat_acc(heart, counter, 1);
++#ifdef USE_POET
++          if (counter == perf_pwr_switch) {
++              poet_set_constraint_type(s_state, POWER);
++          }
++          poet_apply_control(s_state);
++#endif
++        }
+ #ifdef ENABLE_OPENMP
+ #pragma omp parallel for private(i, price, priceDelta)
+         for (i=0; i<numOptions; i++) {
+@@ -321,6 +426,8 @@ int main (int argc, char **argv)
+     int * buffer2;
+     int rv;
+ 
++    hb_poet_init();
++
+ #ifdef PARSEC_VERSION
+ #define __PARSEC_STRING(x) #x
+ #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
+@@ -505,6 +612,8 @@ int main (int argc, char **argv)
+     __parsec_bench_end();
+ #endif
+ 
++    hb_poet_finish();
++
+     return 0;
+ }
+ 
+diff --git a/pkgs/apps/bodytrack/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/bodytrack/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..6ffc56d
+--- /dev/null
++++ b/pkgs/apps/bodytrack/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/bodytrack/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/bodytrack/src/TrackingBenchmark/main.cpp b/pkgs/apps/bodytrack/src/TrackingBenchmark/main.cpp
+index b25b18a..8a0811e 100644
+--- a/pkgs/apps/bodytrack/src/TrackingBenchmark/main.cpp
++++ b/pkgs/apps/bodytrack/src/TrackingBenchmark/main.cpp
+@@ -65,9 +65,102 @@ using namespace tbb;
+ #include "TrackingModel.h"
+ #include "system.h"
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "BODYTRACK"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++int perf_pwr_switch;
+ 
+ using namespace std;
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++    poet_tradeoff_type_t constraint;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 20;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 100;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++    if(getenv(PREFIX"_CONSTRAINT") == NULL) {
++      constraint = PERFORMANCE;
++    } else if (strcmp(getenv(PREFIX"_CONSTRAINT"), "POWER") == 0){
++      constraint = POWER;
++    } else {
++      constraint = PERFORMANCE;
++    }
++    if (getenv(PREFIX"_PERF_PWR_SWITCH_HB") == NULL) {
++      perf_pwr_switch = -1;
++    } else {
++      perf_pwr_switch = atoi(getenv(PREFIX"_PERF_PWR_SWITCH_HB"));
++    }
++
++    printf("init heartbeat with %f %f %f %d\n", min_heartrate, max_heartrate, power_target, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, constraint, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
++
+ //templated conversion from string
+ template<class T>
+ bool num(const string s, T &n)
+@@ -190,7 +283,15 @@ int mainOMP(string path, int cameras, int frames, int particles, int layers, int
+         __parsec_roi_begin();
+ #endif
+ 	for(int i = 0; i < frames; i++)														//process each set of frames
+-	{	cout << "Processing frame " << i << endl;
++	{
++		heartbeat_acc(heart, i, 1.0);
++#if defined(USE_POET)
++                if (i == perf_pwr_switch) {
++                    poet_set_constraint_type(s_state, POWER);
++                }
++		poet_apply_control(s_state);
++#endif
++		cout << "Processing frame " << i << endl;
+ 		if(!pf.Update((float)i))														//Run particle filter step
+ 		{	cout << "Error loading observation data" << endl;
+ 			return 0;
+@@ -251,7 +352,15 @@ int mainPthreads(string path, int cameras, int frames, int particles, int layers
+         __parsec_roi_begin();
+ #endif
+ 	for(int i = 0; i < frames; i++)														//process each set of frames
+-	{	cout << "Processing frame " << i << endl;
++	{
++		heartbeat_acc(heart, i, 1.0);
++#if defined(USE_POET)
++                if (i == perf_pwr_switch) {
++                    poet_set_constraint_type(s_state, POWER);
++                }
++		poet_apply_control(s_state);
++#endif
++		cout << "Processing frame " << i << endl;
+ 		if(!pf.Update((float)i))														//Run particle filter step
+ 		{	cout << "Error loading observation data" << endl;
+ 			workers.JoinAll();
+@@ -348,7 +457,15 @@ int mainSingleThread(string path, int cameras, int frames, int particles, int la
+         __parsec_roi_begin();
+ #endif
+ 	for(int i = 0; i < frames; i++)														//process each set of frames
+-	{	cout << "Processing frame " << i << endl;
++	{
++		heartbeat_acc(heart, i, 1.0);
++#if defined(USE_POET)
++                if (i == perf_pwr_switch) {
++                    poet_set_constraint_type(s_state, POWER);
++                }
++		poet_apply_control(s_state);
++#endif
++		cout << "Processing frame " << i << endl;
+ 		if(!pf.Update((float)i))														//Run particle filter step
+ 		{	cout << "Error loading observation data" << endl;
+ 			return 0;
+@@ -371,6 +488,8 @@ int main(int argc, char **argv)
+ 	bool OutputBMP;
+ 	int cameras, frames, particles, layers, threads, threadModel;								//process command line parameters to get path, cameras, and frames
+ 
++	hb_poet_init();
++
+ #ifdef PARSEC_VERSION
+ #define __PARSEC_STRING(x) #x
+ #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
+@@ -449,6 +568,8 @@ int main(int argc, char **argv)
+ 			break;
+ 	}
+ 
++	hb_poet_finish();
++
+ #if defined(ENABLE_PARSEC_HOOKS)
+         __parsec_bench_end();
+ #endif
+diff --git a/pkgs/apps/facesim/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/facesim/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..a12f6e3
+--- /dev/null
++++ b/pkgs/apps/facesim/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/facesim/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/facesim/src/Benchmarks/facesim/main.cpp b/pkgs/apps/facesim/src/Benchmarks/facesim/main.cpp
+index 1c4c8d0..d65fe1e 100644
+--- a/pkgs/apps/facesim/src/Benchmarks/facesim/main.cpp
++++ b/pkgs/apps/facesim/src/Benchmarks/facesim/main.cpp
+@@ -14,6 +14,21 @@
+ #include <hooks.h>
+ #endif
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "FACESIM"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++int perf_pwr_switch;
++
+ using namespace PhysBAM;
+ 
+ #ifdef ENABLE_PTHREADS
+@@ -24,6 +39,85 @@ bool PHYSBAM_THREADED_RUN = true;
+ bool PHYSBAM_THREADED_RUN = false;
+ #endif //ENABLE_PTHREADS
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++    poet_tradeoff_type_t constraint;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 20;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 100;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++    if(getenv(PREFIX"_CONSTRAINT") == NULL) {
++      constraint = PERFORMANCE;
++    } else if (strcmp(getenv(PREFIX"_CONSTRAINT"), "POWER") == 0){
++      constraint = POWER;
++    } else {
++      constraint = PERFORMANCE;
++    }
++    if (getenv(PREFIX"_PERF_PWR_SWITCH_HB") == NULL) {
++      perf_pwr_switch = -1;
++    } else {
++      perf_pwr_switch = atoi(getenv(PREFIX"_PERF_PWR_SWITCH_HB"));
++    }
++
++    printf("init heartbeat with %f %f %f %d\n", min_heartrate, max_heartrate, power_target, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, constraint, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
++
+ int main (int argc, char* argv[])
+ {
+ #ifdef PARSEC_VERSION
+@@ -82,6 +176,8 @@ int main (int argc, char* argv[])
+ 		exit (1);
+ 	}
+ 
++	hb_poet_init();
++
+ 	THREAD_DIVISION_PARAMETERS<float>& parameters = *THREAD_DIVISION_PARAMETERS<float>::Singleton();
+ 	parameters.grid_divisions_3d = VECTOR_3D<int> (5, 5, 5);
+ 
+@@ -91,6 +187,8 @@ int main (int argc, char* argv[])
+ 
+ 	delete (THREAD_POOL::Singleton());
+ 
++	hb_poet_finish();
++
+ #ifdef ENABLE_PARSEC_HOOKS
+ 	__parsec_bench_end();
+ #endif
+diff --git a/pkgs/apps/facesim/src/Public_Library/Solids_And_Fluids/SOLIDS_FLUIDS_DRIVER.cpp b/pkgs/apps/facesim/src/Public_Library/Solids_And_Fluids/SOLIDS_FLUIDS_DRIVER.cpp
+index 3179c4c..9b4f47f 100644
+--- a/pkgs/apps/facesim/src/Public_Library/Solids_And_Fluids/SOLIDS_FLUIDS_DRIVER.cpp
++++ b/pkgs/apps/facesim/src/Public_Library/Solids_And_Fluids/SOLIDS_FLUIDS_DRIVER.cpp
+@@ -9,6 +9,14 @@
+ #ifdef ENABLE_PARSEC_HOOKS
+ #include <hooks.h>
+ #endif
++
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++extern heartbeat_t* heart;
++extern poet_state* s_state;
++extern int perf_pwr_switch;
++#define USE_POET
++
+ using namespace PhysBAM;
+ //#####################################################################
+ // Function Execute_Main_Program
+@@ -58,6 +66,13 @@ Simulate_To_Frame (const int frame_input)
+ 	while (current_frame < frame_input)
+ 	{
+ 		LOG::Push_Scope ("FRAME", "Frame %d", current_frame + 1);
++		heartbeat_acc(heart, current_frame, 1);
++#ifdef USE_POET
++                if (current_frame == perf_pwr_switch) {
++                    poet_set_constraint_type(s_state, POWER);
++                }
++		poet_apply_control(s_state);
++#endif
+ 		Preprocess_Frame (current_frame + 1);
+ 		Advance_To_Target_Time (Time_At_Frame (current_frame + 1));
+ 		Postprocess_Frame (++current_frame);
+diff --git a/pkgs/apps/ferret/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/ferret/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..9b8796d
+--- /dev/null
++++ b/pkgs/apps/ferret/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/ferret/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/ferret/src/benchmark/ferret-pthreads.c b/pkgs/apps/ferret/src/benchmark/ferret-pthreads.c
+index 06b3d9c..e80ae72 100644
+--- a/pkgs/apps/ferret/src/benchmark/ferret-pthreads.c
++++ b/pkgs/apps/ferret/src/benchmark/ferret-pthreads.c
+@@ -37,6 +37,21 @@ Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ #include <hooks.h>
+ #endif
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "FERRET"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++int perf_pwr_switch;
++
+ #define DEFAULT_DEPTH	25
+ #define MAXR	100
+ #define IMAGE_DIM	14
+@@ -112,6 +127,84 @@ struct rank_data
+ 
+ struct queue q_rank_out;
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++    poet_tradeoff_type_t constraint;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 20;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 100;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++    if(getenv(PREFIX"_CONSTRAINT") == NULL) {
++      constraint = PERFORMANCE;
++    } else if (strcmp(getenv(PREFIX"_CONSTRAINT"), "POWER") == 0){
++      constraint = POWER;
++    } else {
++      constraint = PERFORMANCE;
++    }
++    if (getenv(PREFIX"_PERF_PWR_SWITCH_HB") == NULL) {
++      perf_pwr_switch = -1;
++    } else {
++      perf_pwr_switch = atoi(getenv(PREFIX"_PERF_PWR_SWITCH_HB"));
++    }
++
++    printf("init heartbeat with %f %f %f %d\n", min_heartrate, max_heartrate, power_target, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, constraint, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
+ 
+ /* ------- The Helper Functions ------- */
+ int cnt_enqueue;
+@@ -375,6 +468,7 @@ void *t_rank (void *dummy)
+ void *t_out (void *dummy)
+ {
+ 	struct rank_data *rank;
++	int count;
+ 	while (1)
+ 	{
+ 		if(dequeue(&q_rank_out, &rank) < 0)
+@@ -399,6 +493,17 @@ void *t_out (void *dummy)
+ 		free(rank->name);
+ 		free(rank);
+ 
++		if(count % 10 == 0) {
++			heartbeat_acc(heart, cnt_dequeue,1);
++#ifdef USE_POET
++			if (cnt_dequeue == perf_pwr_switch) {
++				poet_set_constraint_type(s_state, POWER);
++			}
++			poet_apply_control(s_state);
++#endif
++		}
++		count++;
++
+ 		cnt_dequeue++;
+ 		
+ 		fprintf(stderr, "(%d,%d)\n", cnt_enqueue, cnt_dequeue);
+@@ -428,6 +533,8 @@ int main (int argc, char *argv[])
+ 
+ 	int ret, i;
+ 
++	hb_poet_init();
++
+ #ifdef PARSEC_VERSION
+ #define __PARSEC_STRING(x) #x
+ #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
+@@ -596,6 +703,8 @@ int main (int argc, char *argv[])
+ 
+ 	fclose(fout);
+ 
++	hb_poet_finish();
++
+ #ifdef ENABLE_PARSEC_HOOKS
+ 	__parsec_bench_end();
+ #endif
+diff --git a/pkgs/apps/raytrace/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/raytrace/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..073a733
+--- /dev/null
++++ b/pkgs/apps/raytrace/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/raytrace/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/raytrace/src/MiniView/rtview.cxx b/pkgs/apps/raytrace/src/MiniView/rtview.cxx
+index 635fe5a..b9bdc09 100644
+--- a/pkgs/apps/raytrace/src/MiniView/rtview.cxx
++++ b/pkgs/apps/raytrace/src/MiniView/rtview.cxx
+@@ -15,6 +15,20 @@
+ #include <hooks.h>
+ #endif
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "RAYTRACE"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++
+ using namespace RTTL;
+ using namespace LRT;
+ 
+@@ -47,6 +61,72 @@ LRTFrameBufferHandle lrtFrameBuffer;
+ LRTContext lrtContext;
+ LRTCamera  lrtCamera;
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 30;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 70;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++
++    printf("init heartbeat with %f %f %d\n", min_heartrate, max_heartrate, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
++
+ void InitGL()
+ {
+   glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+@@ -365,6 +445,8 @@ int main(int argc, char* argv[])
+ 
+   parseCommandLine(argc, argv);
+ 
++  hb_poet_init();
++
+   if (glDisplay) {
+     /* initialize glut */
+     glutInit(&argc, argv);
+@@ -485,11 +567,16 @@ int main(int argc, char* argv[])
+     int frame = 0;
+     do {
+       render();
++      heartbeat_acc(heart, frame, 1);
++#ifdef USE_POET
++      poet_apply_control(s_state);
++#endif
+       frame++;
+     } while(!(__builtin_expect(framesToRender > 0,0) && frame >= framesToRender));
+ #ifdef ENABLE_PARSEC_HOOKS
+     __parsec_roi_end();
+ #endif
++    hb_poet_finish();
+     cout << "Done" << endl << flush;
+   }
+ 
+diff --git a/pkgs/apps/swaptions/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/swaptions/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..7f39a47
+--- /dev/null
++++ b/pkgs/apps/swaptions/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/swaptions/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/swaptions/src/HJM_Securities.cpp b/pkgs/apps/swaptions/src/HJM_Securities.cpp
+index c77552a..206f713 100644
+--- a/pkgs/apps/swaptions/src/HJM_Securities.cpp
++++ b/pkgs/apps/swaptions/src/HJM_Securities.cpp
+@@ -34,6 +34,20 @@ tbb::cache_aligned_allocator<parm> memory_parm;
+ #include <hooks.h>
+ #endif
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "SWAPTIONS"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++
+ int NUM_TRIALS = DEFAULT_NUM_TRIALS;
+ int nThreads = 1;
+ int nSwaptions = 1;
+@@ -79,6 +93,71 @@ struct Worker {
+ 
+ #endif //TBB_VERSION
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 30;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 70;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++
++    printf("init heartbeat with %f %f %d\n", min_heartrate, max_heartrate, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
+ 
+ void * worker(void *arg){
+   int tid = *((int *)arg);
+@@ -110,6 +189,11 @@ void * worker(void *arg){
+      assert(iSuccess == 1);
+      swaptions[i].dSimSwaptionMeanPrice = pdSwaptionPrice[0];
+      swaptions[i].dSimSwaptionStdError = pdSwaptionPrice[1];
++     heartbeat_acc(heart, i, swaptions[i].dSimSwaptionStdError);
++#ifdef USE_POET
++     poet_apply_control(s_state);
++#endif
++
+    }
+ 
+    return NULL;
+@@ -137,6 +221,8 @@ int main(int argc, char *argv[])
+ 	
+ 	FTYPE **factors=NULL;
+ 
++	hb_poet_init();
++
+ #ifdef PARSEC_VERSION
+ #define __PARSEC_STRING(x) #x
+ #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
+@@ -323,6 +409,7 @@ int main(int argc, char *argv[])
+ 	  free_dmatrix(swaptions[i].ppdFactors, 0, swaptions[i].iFactors-1, 0, swaptions[i].iN-2);
+         }
+ 
++	hb_poet_finish();
+ 
+ #ifdef TBB_VERSION
+ 	memory_parm.deallocate(swaptions, sizeof(parm));
+diff --git a/pkgs/apps/vips/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/vips/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..85594e4
+--- /dev/null
++++ b/pkgs/apps/vips/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/vips/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/vips/src/libvips/iofuncs/threadpool.c b/pkgs/apps/vips/src/libvips/iofuncs/threadpool.c
+index ed6ff5b..6f3b392 100644
+--- a/pkgs/apps/vips/src/libvips/iofuncs/threadpool.c
++++ b/pkgs/apps/vips/src/libvips/iofuncs/threadpool.c
+@@ -69,6 +69,9 @@
+ #include <dmalloc.h>
+ #endif /*WITH_DMALLOC*/
+ 
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++
+ /**
+  * SECTION: threadpool
+  * @short_description: pools of worker threads 
+@@ -102,6 +105,9 @@ int im__thinstrip_height = IM__THINSTRIP_HEIGHT;
+  */
+ int im__concurrency = 0;
+ 
++heartbeat_t* heart;
++poet_state* s_state;
++
+ #ifndef HAVE_THREADS
+ /* If we're building without gthread, we need stubs for the g_thread_*() and
+  * g_mutex_*() functions. <vips/thread.h> has #defines which point the g_
+@@ -527,6 +533,7 @@ vips_thread_work_unit( VipsThread *thr )
+ }
+ 
+ #ifdef HAVE_THREADS
++static int worker_counter = 0;
+ /* What runs as a thread ... loop, waiting to be told to do stuff.
+  */
+ static void *
+@@ -544,6 +551,13 @@ vips_thread_main_loop( void *a )
+ 		vips_thread_work_unit( thr );
+ 		im_semaphore_up( &pool->tick );
+ 
++		if(worker_counter % 200 == 0) {
++			heartbeat_acc(heart, worker_counter, 1);
++#ifdef USE_POET
++			poet_apply_control(s_state);
++#endif
++		}
++		worker_counter++;
+ 		if( pool->stop || pool->error )
+ 			break;
+ 	} 
+diff --git a/pkgs/apps/vips/src/tools/iofuncs/vips.c b/pkgs/apps/vips/src/tools/iofuncs/vips.c
+index 5dd7bd8..a4c1208 100644
+--- a/pkgs/apps/vips/src/tools/iofuncs/vips.c
++++ b/pkgs/apps/vips/src/tools/iofuncs/vips.c
+@@ -73,12 +73,27 @@
+ #include <vips/intl.h>
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <ctype.h>
+ #include <locale.h>
+ 
+ #include <vips/vips.h>
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "VIPS"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++
+ #ifdef OS_WIN32
+ #define strcasecmp(a,b) _stricmp(a,b)
+ #endif
+@@ -91,6 +106,72 @@ static char *main_option_cpph = NULL;
+ static char *main_option_cppc = NULL;
+ static gboolean *main_option_version;
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 30;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 70;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++
++    printf("init heartbeat with %f %f %d\n", min_heartrate, max_heartrate, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
++
+ static GOptionEntry main_option[] = {
+ 	{ "list", 'l', 0, G_OPTION_ARG_STRING, &main_option_list, 
+ 		N_( "list operations in PACKAGE "
+@@ -969,6 +1050,8 @@ main( int argc, char **argv )
+ 			argc -= 1;
+ 		}
+ 
++	hb_poet_init();
++
+ 	/* Should we try to run the thing we are named as?
+ 	 */
+ 	if( !im_isprefix( "vips", g_get_prgname() ) ) {
+@@ -1020,5 +1103,6 @@ main( int argc, char **argv )
+ 
+ 	im_close_plugins();
+ 
++	hb_poet_finish();
+ 	return( 0 );
+ }
+diff --git a/pkgs/apps/x264/parsec/gcc-hooks-poet.bldconf b/pkgs/apps/x264/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..29d0e2b
+--- /dev/null
++++ b/pkgs/apps/x264/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/apps/x264/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/apps/x264/src/x264.c b/pkgs/apps/x264/src/x264.c
+index 5b740e0..316ef3b 100644
+--- a/pkgs/apps/x264/src/x264.c
++++ b/pkgs/apps/x264/src/x264.c
+@@ -47,6 +47,21 @@
+ #include <hooks.h>
+ #endif
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "X264"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
++int perf_pwr_switch;
++
+ uint8_t *mux_buffer = NULL;
+ int mux_buffer_size = 0;
+ 
+@@ -85,6 +100,84 @@ static void Help( x264_param_t *defaults, int b_longhelp );
+ static int  Parse( int argc, char **argv, x264_param_t *param, cli_opt_t *opt );
+ static int  Encode( x264_param_t *param, cli_opt_t *opt );
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++    poet_tradeoff_type_t constraint;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 20;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 100;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++    if(getenv(PREFIX"_CONSTRAINT") == NULL) {
++      constraint = PERFORMANCE;
++    } else if (strcmp(getenv(PREFIX"_CONSTRAINT"), "POWER") == 0){
++      constraint = POWER;
++    } else {
++      constraint = PERFORMANCE;
++    }
++    if (getenv(PREFIX"_PERF_PWR_SWITCH_HB") == NULL) {
++      perf_pwr_switch = -1;
++    } else {
++      perf_pwr_switch = atoi(getenv(PREFIX"_PERF_PWR_SWITCH_HB"));
++    }
++
++    printf("init heartbeat with %f %f %f %d\n", min_heartrate, max_heartrate, power_target, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, constraint, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
++
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
+ 
+ /****************************************************************************
+  * main:
+@@ -95,6 +188,8 @@ int main( int argc, char **argv )
+     cli_opt_t opt;
+     int ret;
+ 
++    hb_poet_init();
++
+ #ifdef PARSEC_VERSION
+ #define __PARSEC_STRING(x) #x
+ #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
+@@ -138,6 +233,8 @@ int main( int argc, char **argv )
+     __parsec_bench_end();
+ #endif
+ 
++    hb_poet_finish();
++
+     return ret;
+ }
+ 
+@@ -873,6 +970,16 @@ static int  Encode( x264_param_t *param, cli_opt_t *opt )
+ 
+         i_frame++;
+ 
++        if(i_frame >= 12) {
++	    heartbeat_acc(heart, i_frame, i_file);
++#ifdef USE_POET
++            if (i_frame == perf_pwr_switch) {
++                poet_set_constraint_type(s_state, POWER);
++            }
++            poet_apply_control(s_state);
++#endif
++        }
++
+         /* update status line (up to 1000 times per input file) */
+         if( opt->b_progress && i_frame % i_update_interval == 0 )
+         {
+diff --git a/pkgs/kernels/dedup/parsec/gcc-hooks-poet.bldconf b/pkgs/kernels/dedup/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..a9bd8a8
+--- /dev/null
++++ b/pkgs/kernels/dedup/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/kernels/dedup/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/kernels/dedup/src/dedup.c b/pkgs/kernels/dedup/src/dedup.c
+index 8c3dc54..f8522fb 100644
+--- a/pkgs/kernels/dedup/src/dedup.c
++++ b/pkgs/kernels/dedup/src/dedup.c
+@@ -21,10 +21,87 @@
+ #include <hooks.h>
+ #endif //ENABLE_PARSEC_HOOKS
+ 
++#define HB_ENERGY_IMPL
++#include <heartbeats/hb-energy.h>
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++#include <poet/poet_config.h>
++
++#define PREFIX "DEDUP"
++#define USE_POET // Power and performance control
++
++heartbeat_t* heart;
++poet_state* s_state;
++static poet_control_state_t* s_control_states;
++static poet_cpu_state_t* s_cpu_states;
+ 
+ config_t * conf;
+ 
++static inline void hb_poet_init() {
++    float min_heartrate;
++    float max_heartrate;
++    int window_size;
++    double power_target;
++    unsigned int s_nstates;
++
++    if(getenv(PREFIX"_MIN_HEART_RATE") == NULL) {
++      min_heartrate = 0.0;
++    } else {
++      min_heartrate = atof(getenv(PREFIX"_MIN_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_MAX_HEART_RATE") == NULL) {
++      max_heartrate = 100.0;
++    } else {
++      max_heartrate = atof(getenv(PREFIX"_MAX_HEART_RATE"));
++    }
++    if(getenv(PREFIX"_WINDOW_SIZE") == NULL) {
++      window_size = 30;
++    } else {
++      window_size = atoi(getenv(PREFIX"_WINDOW_SIZE"));
++    }
++    if(getenv(PREFIX"_POWER_TARGET") == NULL) {
++      power_target = 70;
++    } else {
++      power_target = atof(getenv(PREFIX"_POWER_TARGET"));
++    }
++
++    printf("init heartbeat with %f %f %d\n", min_heartrate, max_heartrate, window_size);
++    heart = heartbeat_acc_pow_init(window_size, 100, "heartbeat.log",
++                                   min_heartrate, max_heartrate,
++                                   0, 100,
++                                   1, hb_energy_impl_alloc(), power_target, power_target);
++    if (heart == NULL) {
++      fprintf(stderr, "Failed to init heartbeat.\n");
++      exit(1);
++    }
++#ifdef USE_POET
++    if (get_control_states(NULL, &s_control_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load control states.\n");
++      exit(1);
++    }
++    if (get_cpu_states(NULL, &s_cpu_states, &s_nstates)) {
++      fprintf(stderr, "Failed to load cpu states.\n");
++      exit(1);
++    }
++    s_state = poet_init(heart, s_nstates, s_control_states, s_cpu_states, &apply_cpu_config, &get_current_cpu_state, 1, "poet.log");
++    if (s_state == NULL) {
++      fprintf(stderr, "Failed to init poet.\n");
++      exit(1);
++    }
++#endif
++   printf("heartbeat init'd\n");
++
++}
+ 
++static inline void hb_poet_finish() {
++#ifdef USE_POET
++    poet_destroy(s_state);
++    free(s_control_states);
++    free(s_cpu_states);
++#endif
++    heartbeat_finish(heart);
++    printf("heartbeat finished\n");
++}
+ 
+ /*--------------------------------------------------------------------------*/
+ static void
+@@ -43,6 +120,8 @@ usage(char* prog)
+ }
+ /*--------------------------------------------------------------------------*/
+ int main(int argc, char** argv) {
++  hb_poet_init();
++
+ #ifdef PARSEC_VERSION
+ #define __PARSEC_STRING(x) #x
+ #define __PARSEC_XSTRING(x) __PARSEC_STRING(x)
+@@ -107,6 +186,7 @@ int main(int argc, char** argv) {
+       break;
+     case 'h':
+       usage(argv[0]);
++      hb_poet_finish();
+       return -1;
+     case 'p':
+       conf->preloading = TRUE;
+@@ -120,6 +200,7 @@ int main(int argc, char** argv) {
+     case '?':
+       fprintf(stdout, "Unknown option `-%c'.\n", optopt);
+       usage(argv[0]);
++      hb_poet_finish();
+       return -1;
+     }
+   }
+@@ -127,6 +208,7 @@ int main(int argc, char** argv) {
+ #ifndef ENABLE_BZIP2_COMPRESSION
+  if (conf->compress_type == COMPRESS_BZIP2){
+     printf("Bzip2 compression not supported\n");
++    hb_poet_finish();
+     exit(1);
+   }
+ #endif
+@@ -134,6 +216,7 @@ int main(int argc, char** argv) {
+ #ifndef ENABLE_GZIP_COMPRESSION
+  if (conf->compress_type == COMPRESS_GZIP){
+     printf("Gzip compression not supported\n");
++    hb_poet_finish();
+     exit(1);
+   }
+ #endif
+@@ -164,6 +247,8 @@ int main(int argc, char** argv) {
+   __parsec_bench_end();
+ #endif
+ 
++  hb_poet_finish();
++
+   return 0;
+ }
+ 
+diff --git a/pkgs/kernels/dedup/src/encoder.c b/pkgs/kernels/dedup/src/encoder.c
+index 6911a70..10b0035 100644
+--- a/pkgs/kernels/dedup/src/encoder.c
++++ b/pkgs/kernels/dedup/src/encoder.c
+@@ -57,6 +57,10 @@
+ #include <hooks.h>
+ #endif //ENABLE_PARSEC_HOOKS
+ 
++#include <heartbeats/heartbeat-accuracy-power.h>
++#include <poet/poet.h>
++extern heartbeat_t* heart;
++extern poet_state* s_state;
+ 
+ #define INITIAL_SEARCH_TREE_SIZE 4096
+ 
+@@ -394,6 +398,8 @@ void sub_Compress(chunk_t *chunk) {
+  *  - Enqueue each item into send queue
+  */
+ #ifdef ENABLE_PTHREADS
++int counter = 0;
++
+ void *Compress(void * targs) {
+   struct thread_args *args = (struct thread_args *)targs;
+   const int qid = args->tid / MAX_THREADS_PER_QUEUE;
+@@ -435,6 +441,11 @@ void *Compress(void * targs) {
+ 
+     //put the item in the next queue for the write thread
+     if (ringbuffer_isFull(&send_buf)) {
++      int old_counter = __sync_fetch_and_add(&counter, 1);
++      heartbeat_acc(heart, old_counter, 1);
++#ifdef USE_POET
++      poet_apply_control(s_state);
++#endif
+       r = queue_enqueue(&reorder_que[qid], &send_buf, ITEM_PER_INSERT);
+       assert(r>=1);
+     }
+diff --git a/pkgs/libs/glib/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/glib/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..9d3e6b2
+--- /dev/null
++++ b/pkgs/libs/glib/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/glib/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/libs/gsl/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/gsl/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..c6c144b
+--- /dev/null
++++ b/pkgs/libs/gsl/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/gsl/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/libs/hooks/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/hooks/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..2cd5157
+--- /dev/null
++++ b/pkgs/libs/hooks/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/hooks/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/libs/hooks/src/Makefile b/pkgs/libs/hooks/src/Makefile
+index f31819b..cbaddbc 100644
+--- a/pkgs/libs/hooks/src/Makefile
++++ b/pkgs/libs/hooks/src/Makefile
+@@ -10,6 +10,6 @@
+ # distribution. You also need to make sure that the shared library can be
+ # found at run time. The PARSEC framework already takes care of this.
+ 
+-#include Makefile.static
+-include Makefile.shared
++include Makefile.static
++#include Makefile.shared
+ 
+diff --git a/pkgs/libs/libjpeg/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/libjpeg/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..8c98b6c
+--- /dev/null
++++ b/pkgs/libs/libjpeg/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/libjpeg/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/libs/libxml2/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/libxml2/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..c101fc4
+--- /dev/null
++++ b/pkgs/libs/libxml2/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/libxml2/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/libs/mesa/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/mesa/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..95de5e6
+--- /dev/null
++++ b/pkgs/libs/mesa/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/mesa/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/libs/ssl/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/ssl/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..e03a4c2
+--- /dev/null
++++ b/pkgs/libs/ssl/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/ssl/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/libs/zlib/parsec/gcc-hooks-poet.bldconf b/pkgs/libs/zlib/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..7a92fed
+--- /dev/null
++++ b/pkgs/libs/zlib/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/libs/zlib/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/tools/cmake/parsec/gcc-hooks-poet.bldconf b/pkgs/tools/cmake/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..9a353f4
+--- /dev/null
++++ b/pkgs/tools/cmake/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,5 @@
++#!/bin/bash
++
++# gcc-hooks-poet.bldconf - configuration file for PARSEC
++
++source ${PARSECDIR}/pkgs/tools/cmake/parsec/gcc-hooks.bldconf
+diff --git a/pkgs/tools/libtool/parsec/gcc-hooks-poet.bldconf b/pkgs/tools/libtool/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..3f5a65c
+--- /dev/null
++++ b/pkgs/tools/libtool/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,4 @@
++#!/bin/bash
++
++source ${PARSECDIR}/pkgs/tools/libtool/parsec/gcc-hooks.bldconf
++
+diff --git a/pkgs/tools/yasm/parsec/gcc-hooks-poet.bldconf b/pkgs/tools/yasm/parsec/gcc-hooks-poet.bldconf
+new file mode 100644
+index 0000000..6773df8
+--- /dev/null
++++ b/pkgs/tools/yasm/parsec/gcc-hooks-poet.bldconf
+@@ -0,0 +1,4 @@
++#!/bin/bash
++
++source ${PARSECDIR}/pkgs/tools/yasm/parsec/gcc-hooks.bldconf
++
