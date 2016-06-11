@@ -152,3 +152,10 @@ li {padding-top: 5px;}
 	width: 500px;
 	font-size: 10px;
 }
+
+.publications ul, .publications li {
+	padding-left: 10px;
+	padding-bottom: 5px;
+	list-style-type: none;
+}
+
