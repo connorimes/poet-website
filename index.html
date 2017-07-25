@@ -80,6 +80,11 @@
 						Git patches are available for eight benchmarks from three different suites.
 						<br />
 						Instructions are for the POET patches, but the process is the same for Bard patches.
+						<p>
+							<b>Note</b>: If you get an error like
+							<pre>fatal: git apply: bad git-diff - expected /dev/null on line 4</pre>
+							while applying a patch, you may need to run <em>dos2unix</em> on the diff file(s), then try again.
+						</p>
 						<h3>PARSEC</h3>
 						<p>
 							POET: <a href="parsec-3.0-beta-20130728-poet.diff">parsec-3.0-beta-20130728-poet.diff</a>
